@@ -1,0 +1,15 @@
+#!/bin/sh
+# 示例：随固件注入的首次开机 uci-defaults（执行后会被系统自动删除）。
+# 不想定制可以把整个 files/ 目录删掉。
+# 注意：不要在这里写 PON SN / MAC / LOID / 校准数据，那些在 factory UBI 卷里。
+
+uci -q set system.@system[0].hostname='HG5585F-CT'
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q set system.@system[0].timezone='CST-8'
+uci -q commit system
+
+# 这台设备之前踩过 /etc/nftables.d/*.nft 与 fw4 的 chain 冲突，
+# 若你自行注入了自定义 nft 片段，开机后务必执行一次 fw4 check。
+# /etc/init.d/firewall restart
+
+exit 0
