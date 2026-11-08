@@ -3,9 +3,9 @@
 #
 # 用法一（推荐）：新建一个空仓库，把本目录的 4 个文件放到对应位置：
 #   .github/workflows/build-hg5585f-ct.yml   <- 本文件
-#   Config-HG5585F-CT.txt
-#   customize.sh
-#   files/            （可选，里面放要覆盖进 rootfs 的文件）
+#   Config-HG5585F-CT.txt                     <- 单设备 + PON + 新增包 + 国内源
+#   customize.sh                              <- 时区/NTP/主机名 + 生成 apk 源
+#   files/                                    <- 首次开机 uci-defaults（承载默认设置，别删）
 # 然后 Actions -> Build PonWrt HG5585F-CT -> Run workflow。
 #
 # 用法二：fork pbs05/ponwrt，把本文件放进 .github/workflows/，
@@ -33,6 +33,11 @@ on:
         required: false
         default: false
         type: boolean
+      apk_repo_key_url:
+        description: '可选：apk 软件源公钥 URL（自编译固件装官方包报 UNTRUSTED signature 时用）'
+        required: false
+        default: ''
+        type: string
   # 需要定时编译时再取消下面两行注释（UTC 21:00 周日 = 北京时间周一 05:00）
   # schedule:
   #   - cron: '0 21 * * 0'
@@ -113,16 +118,20 @@ jobs:
 
       - name: Apply custom rootfs files
         run: |
+          mkdir -p "$GITHUB_WORKSPACE/wrt/files"
           if [ -d "$GITHUB_WORKSPACE/files" ]; then
             cp -a "$GITHUB_WORKSPACE/files/." "$GITHUB_WORKSPACE/wrt/files/"
+            chmod +x "$GITHUB_WORKSPACE/wrt/files/etc/uci-defaults/"* 2>/dev/null || true
             echo "custom rootfs files injected:"
             find "$GITHUB_WORKSPACE/files" -type f -printf '  %P\n'
           else
             echo "no custom files/ directory, skip"
           fi
 
-      - name: Configure (single device + PON feeds)
+      - name: Configure (single device + PON feeds + extras)
         working-directory: wrt
+        env:
+          APK_REPO_KEY_URL: ${{ inputs.apk_repo_key_url }}
         run: |
           cp configs/an7581.config .config
           cat "$GITHUB_WORKSPACE/Config-HG5585F-CT.txt" >> .config
@@ -147,6 +156,32 @@ jobs:
             echo "ERROR: PON feed disabled by config" >&2
             exit 1
           fi
+
+          echo "===== user-requested packages（缺失即失败，避免编出不含插件的固件） ====="
+          for p in tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn \
+                   vlmcsd luci-app-vlmcsd luci-i18n-vlmcsd-zh-cn; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              echo "  OK   $p"
+            else
+              echo "ERROR: $p 未启用（feed 里找不到该包，或 defconfig 因依赖降级）" >&2
+              exit 1
+            fi
+          done
+
+          echo "===== 默认设置：软件源 / 时区 / NTP ====="
+          # VERSION_REPO 不是 kconfig 符号，defconfig 可能丢弃；只提示。
+          # 真正生效的是下面 distfeeds.list 覆盖文件 + uci-defaults 兜底。
+          grep -E '^CONFIG_VERSION_REPO=' .config \
+            || echo "INFO: VERSION_REPO 被 defconfig 丢弃（不影响，源由 files/ 覆盖）"
+          grep -E '^CONFIG_PACKAGE_zoneinfo-(core|asia)=y' .config \
+            || echo "WARN: zoneinfo 未选中，Asia/Shanghai 可能只显示名字" >&2
+          grep -n -E "timezone=|zonename=|add_list system.ntp.server" \
+            package/base-files/files/bin/config_generate | head -8
+          echo "--- files/etc/apk/repositories.d/distfeeds.list ---"
+          cat files/etc/apk/repositories.d/distfeeds.list
+          test "$(grep -c packages.adb files/etc/apk/repositories.d/distfeeds.list)" -eq 6 \
+            || { echo "ERROR: apk 源不是预期的 6 条" >&2; exit 1; }
+
           cp .config "$GITHUB_WORKSPACE/Config-final.txt"
 
       - name: Upload config (test_only)
