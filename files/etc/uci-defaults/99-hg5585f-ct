@@ -1,15 +1,63 @@
 #!/bin/sh
-# 示例：随固件注入的首次开机 uci-defaults（执行后会被系统自动删除）。
-# 不想定制可以把整个 files/ 目录删掉。
+# 首次开机 uci-defaults：出厂默认设置的兜底层，执行后系统会自动删除本脚本。
+# 与 customize.sh 改 config_generate 的区别：
+#   config_generate 只在"全新生成 /etc/config/system"时生效；
+#   本脚本在 sysupgrade 保留配置的首次启动也会跑，能补上老配置里的默认值。
+#
+# 只改"仍是出厂默认值"的项，不覆盖用户自己改过的配置；把 FORCE 改成 1 可强制覆盖。
 # 注意：不要在这里写 PON SN / MAC / LOID / 校准数据，那些在 factory UBI 卷里。
 
-uci -q set system.@system[0].hostname='HG5585F-CT'
-uci -q set system.@system[0].zonename='Asia/Shanghai'
-uci -q set system.@system[0].timezone='CST-8'
+FORCE=0
+TZ_NEW='<+08>-8'                 # UTC+8，无夏令时
+ZONE_NEW='Asia/Shanghai'
+HOST_NEW='HG5585F-CT'
+REPO='https://mirrors.pku.edu.cn/immortalwrt/snapshots'
+ARCH='aarch64_cortex-a53'
+SUBTARGET='airoha/an7581'
+
+cur_tz=$(uci -q get system.@system[0].timezone || true)
+cur_host=$(uci -q get system.@system[0].hostname || true)
+
+apply_tz=0
+case "$cur_tz" in
+  ''|GMT0|UTC|CST-8|'<+08>-8') apply_tz=1 ;;
+esac
+[ "$FORCE" = "1" ] && apply_tz=1
+
+if [ "$apply_tz" = "1" ]; then
+  uci -q set system.@system[0].timezone="$TZ_NEW"
+  uci -q set system.@system[0].zonename="$ZONE_NEW"
+fi
+
+case "$cur_host" in
+  ''|ponwrt|OpenWrt|ImmortalWrt) uci -q set system.@system[0].hostname="$HOST_NEW" ;;
+esac
+[ "$FORCE" = "1" ] && uci -q set system.@system[0].hostname="$HOST_NEW"
+
+# 只把源码自带的境外 NTP 换成国内源；用户自定义过的列表保持不动
+if uci -q get system.ntp.server | grep -qE 'time\.apple\.com|time1\.google\.com|time\.cloudflare\.com|pool\.ntp\.org'; then
+  uci -q delete system.ntp.server
+  uci -q set system.ntp.enabled='1'
+  uci -q set system.ntp.enable_server='0'
+  for s in ntp.aliyun.com time1.cloud.tencent.com ntp.ntsc.ac.cn cn.pool.ntp.org; do
+    uci -q add_list system.ntp.server="$s"
+  done
+fi
 uci -q commit system
 
+# 国内 apk 软件源：即使 sysupgrade 保留了旧的 distfeeds.list 也保证生效。
+# 只写官方镜像上确实存在的 6 条，不写 pon_drivers / pon_userspace / video。
+mkdir -p /etc/apk/repositories.d
+{
+  echo '# 国内软件源（北大镜像），由 99-hg5585f-ct 生成。'
+  echo "$REPO/targets/$SUBTARGET/packages/packages.adb"
+  for feed in base luci packages routing telephony; do
+    echo "$REPO/packages/$ARCH/$feed/packages.adb"
+  done
+} > /etc/apk/repositories.d/distfeeds.list
+
 # 这台设备之前踩过 /etc/nftables.d/*.nft 与 fw4 的 chain 冲突，
-# 若你自行注入了自定义 nft 片段，开机后务必执行一次 fw4 check。
+# 若自行注入了自定义 nft 片段，开机后务必执行一次 fw4 check。
 # /etc/init.d/firewall restart
 
 exit 0
