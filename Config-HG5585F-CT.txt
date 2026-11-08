@@ -1,0 +1,86 @@
+# HG5585F-CT 专用覆盖配置
+# 用法：cp configs/an7581.config .config && cat Config-HG5585F-CT.txt >> .config && make defconfig
+# 说明：kconfig 采用"后出现的值覆盖前出现的值"，所以本文件必须追加在基础配置之后。
+# 目标：只编译 FiberHome HG5585F CT，避免 ALL_PROFILES 把 AN7581 全部机型都编一遍。
+
+## ---- 目标平台（与 configs/an7581.config 保持一致） ----
+CONFIG_TARGET_airoha=y
+CONFIG_TARGET_airoha_an7581=y
+CONFIG_TARGET_MULTI_PROFILE=y
+CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+# CONFIG_TARGET_ALL_PROFILES is not set
+CONFIG_TARGET_ROOTFS_SQUASHFS=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+
+## ---- 只保留 HG5585F CT ----
+# CONFIG_TARGET_airoha_an7581_DEVICE_fiberhome_hg5585f-ct is not set
+CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct-usb-sfp is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-cu-usb-sfp is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5382a is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_gemtek_xg2010g is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-md-ubi-usb-sfp is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_xg-040g-tf-ubi is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_unionman_ung00a is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_znxt_zn504xg-d is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_znxt_zn515xg-d is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_gemtek_w1700k-ubi is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_quantum_q1000k-ubi is not set
+# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_nokia_valyrian is not set
+
+## ---- PON 两个 feed 必须打开 ----
+# VIKINGYFY/OpenWRT-CI 的 Config/GENERAL.txt 默认把它们写成 =n，会把 PON 功能整个关掉。
+CONFIG_FEED_pon_drivers=y
+CONFIG_FEED_pon_userspace=y
+# CONFIG_FEED_video is not set
+
+## ---- PON 内核驱动（openwrt-pon-drivers） ----
+CONFIG_PACKAGE_kmod-airoha-pon-frontend=y
+CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
+CONFIG_PACKAGE_kmod-airoha-xpon=y
+# CT 变体的 2.5G PHY 是 GPY211C（MaxLinear）
+CONFIG_PACKAGE_kmod-phy-maxlinear=y
+
+## ---- PON 用户态（openwrt-pon-userspace，Rust 包） ----
+CONFIG_PACKAGE_airoha-pond=y
+CONFIG_PACKAGE_airoha-ponctl=y
+CONFIG_PACKAGE_airoha-pon-debug=y
+CONFIG_PACKAGE_luci-app-pon=y
+CONFIG_PACKAGE_luci-app-iptv=y
+# airoha-pond / luci-app-pon 的依赖，显式打开避免 defconfig 时丢包
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_mtd=y
+CONFIG_PACKAGE_ubi-utils=y
+CONFIG_PACKAGE_nand-utils=y
+
+## ---- LuCI 基础 ----
+CONFIG_PACKAGE_luci=y
+CONFIG_LUCI_LANG_zh_Hans=y
+CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+
+## ---- 本地化默认设置（编译期） ----
+# VERSION_REPO 会被 include/feeds.mk 的 FeedSourcesAppendAPK 用作 %U，
+# 生成编译期那份 distfeeds.list 的域名。北大镜像目录结构与官方一致。
+# 注意：它在本源码里不是 kconfig 符号，defconfig 可能丢弃；最终固件里的源
+# 由 customize.sh 生成的 files/etc/apk/repositories.d/distfeeds.list 覆盖保证。
+CONFIG_VERSION_REPO="https://mirrors.pku.edu.cn/immortalwrt/snapshots"
+CONFIG_PER_FEED_REPO=y
+# Asia/Shanghai 需要 zoneinfo 数据（/usr/share/zoneinfo/Asia/Shanghai）
+CONFIG_PACKAGE_zoneinfo-core=y
+CONFIG_PACKAGE_zoneinfo-asia=y
+# 基础 an7581.config 已带 ca-bundle / libustream-openssl / wget-ssl / kmod-tun，
+# 这里不再重复指定 libustream-mbedtls，避免与 openssl 版 PROVIDES 冲突。
+
+## ---- 用户指定新增软件包 ----
+# 全部来自 pbs05/ponwrt 已有的 immortalwrt/packages + immortalwrt/luci 两个 feed，
+# 不需要额外添加第三方软件源。i18n 包由 luci.mk 依据 po/zh_Hans 自动生成。
+CONFIG_PACKAGE_tailscale=y
+CONFIG_PACKAGE_luci-app-tailscale-community=y
+CONFIG_PACKAGE_luci-i18n-tailscale-community-zh-cn=y
+CONFIG_PACKAGE_vlmcsd=y
+CONFIG_PACKAGE_luci-app-vlmcsd=y
+CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn=y
+# tailscale Makefile: DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun
+CONFIG_PACKAGE_kmod-tun=y
