@@ -16,3 +16,13 @@
 # 服务配置在 /etc/config/prplmesh（role=controller 做主路由）。
 # 运行时配置步骤见 README 第八节 / 对话记录，固件先只装包不预配。
 CONFIG_PACKAGE_prplmesh=y
+
+## ---- prplmesh stock 模式的运行时依赖（必须进 rootfs） ----
+# 注意：prplmesh 的 Makefile DEPENDS 不含 wpad/hostapd（只声明 libnl/libopenssl 等库），
+# 而基础配置里 wpad-openssl 是 =m（只打包成 apk，不进镜像）。stock OpenWrt 模式
+# 运行时完全依赖 hostapd 的控制接口（nl80211 + hostapd ctrl），必须显式装 wpad。
+# 选 wpad-openssl（全功能版）：含 EasyMesh 所需的 802.11k/v/r 与 multi_ap BSS 支持，
+# wpad-basic-* 系列缺 k/v/r，不能用于 mesh。选 openssl 变体与 libopenssl 依赖一致，
+# 避免 kconfig 里 mbedtls/wolfssl PROVIDES 冲突。
+CONFIG_PACKAGE_wpad-openssl=y
+CONFIG_PACKAGE_hostapd-common=y

@@ -214,9 +214,12 @@ jobs:
           fi
 
           echo "===== user-requested packages（缺失即失败，避免编出不含插件的固件） ====="
-          # prplmesh 是本 EasyMesh 版相对基础版的唯一增量，必须硬断言。
+          # prplmesh 是本 EasyMesh 版相对基础版的唯一增量，必须硬断言；
+          # wpad-openssl 是 prplmesh stock 模式的运行时依赖（其 Makefile 未声明，
+          # 不显式 =y 的话 wpad 只打包不进 rootfs，mesh 起不来），一并硬断言。
           for p in tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn \
-                   vlmcsd luci-app-vlmcsd luci-i18n-vlmcsd-zh-cn prplmesh; do
+                   vlmcsd luci-app-vlmcsd luci-i18n-vlmcsd-zh-cn \
+                   prplmesh wpad-openssl hostapd-common; do
             if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
               echo "  OK   $p"
             else
