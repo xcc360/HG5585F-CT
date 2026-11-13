@@ -84,3 +84,8 @@ CONFIG_PACKAGE_luci-app-vlmcsd=y
 CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn=y
 # tailscale Makefile: DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +kmod-tun
 CONFIG_PACKAGE_kmod-tun=y
+
+## ---- EasyMesh 追加块已拆分到独立文件 ----
+# 需要 EasyMesh（prplmesh，与中兴 E2637 组 mesh）请使用：
+#   workflow: build-hg5585f-ct-easymesh.yml（会额外追加 Config-HG5585F-CT-EasyMesh.txt）
+# 不需要则用本文件 + build-hg5585f-ct.yml，固件里不装 mesh 组件。

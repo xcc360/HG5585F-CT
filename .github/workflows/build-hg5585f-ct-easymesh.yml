@@ -1,0 +1,384 @@
+# SPDX-License-Identifier: MIT
+# PonWrt / HG5585F-CT EasyMesh 版自包含云编译 workflow
+#
+# 与 build-hg5585f-ct.yml（基础版）的唯一区别：额外追加
+#   Config-HG5585F-CT-EasyMesh.txt（prplmesh，Wi-Fi Alliance EasyMesh 开源实现）
+# 用于与中兴 E2637 等 EasyMesh 路由器组有线 mesh。
+# 不需要 EasyMesh 的人请用基础版 workflow + Config-HG5585F-CT.txt，固件里不装 mesh 组件。
+#
+# 用法：把本目录 5 个文件放到对应位置：
+#   .github/workflows/build-hg5585f-ct-easymesh.yml  <- 本文件
+#   Config-HG5585F-CT.txt                             <- 基础配置（单设备 + PON + 新增包 + 国内源）
+#   Config-HG5585F-CT-EasyMesh.txt                    <- EasyMesh 追加块（prplmesh）
+#   customize.sh                                      <- 时区/NTP/主机名 + 生成 apk 源
+#   files/                                            <- 首次开机 uci-defaults（承载默认设置，别删）
+# 然后 Actions -> Build PonWrt HG5585F-CT (EasyMesh) -> Run workflow。
+#
+# 源码固定用 pbs05/ponwrt；两个 PON 仓由它的 feeds.conf.default 自动拉取，无需单独 clone.
+#
+# Actions 运行时（2026-11 起 runner 已移除 Node 20，全部要用 Node 24 版本）：
+#   checkout@v5 / upload-artifact@v6 / action-gh-release@v3
+#
+# 同批 packages：make 默认就把 =m/=y 的包编成 .apk，且在 world 末尾生成 packages.adb；
+# 本 workflow 会把它们连同 public-key.pem 一起打包发布（kmod 与本次内核 vermagic 严格绑定）。
+# 可选 Secret APK_SIGNING_KEY（PEM 私钥）固定签名 key，不设则每次编译随机生成、仅同批互信。
+
+name: Build PonWrt HG5585F-CT (EasyMesh)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'pbs05/ponwrt 的分支或 tag（默认 master）'
+        required: false
+        default: 'master'
+        type: string
+      test_only:
+        description: '只生成并上传 .config，不编译（先用来验配置）'
+        required: false
+        default: false
+        type: boolean
+      create_release:
+        description: '把固件发布到 GitHub Release'
+        required: false
+        default: false
+        type: boolean
+      apk_repo_key_url:
+        description: '可选：apk 软件源公钥 URL（自编译固件装官方包报 UNTRUSTED signature 时用）'
+        required: false
+        default: ''
+        type: string
+      publish_packages:
+        description: '同期收集并发布本次编译产出的 packages（含与内核匹配的 kmod 包 + packages.adb 索引）'
+        required: false
+        default: true
+        type: boolean
+      packages_repo_url:
+        description: '可选：自建 packages 源的站点根 URL，随固件写入 customfeeds.list（留空则只发布产物）'
+        required: false
+        default: ''
+        type: string
+  # 需要定时编译时再取消下面两行注释（UTC 21:00 周日 = 北京时间周一 05:00）
+  # schedule:
+  #   - cron: '0 21 * * 0'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hg5585f-ct-easymesh-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 注意：不在顶层 env 里引用 inputs，避免 schedule/其他事件触发时上下文为空。
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    name: PonWrt / airoha-an7581 / HG5585F-CT (EasyMesh)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout build assets
+        uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/lib/jvm /usr/share/swift
+          sudo apt-get clean
+          df -h /
+          # /mnt 是 runner 上更大的临时盘，把整个构建树放过去
+          sudo mkdir -p /mnt/build_wrt
+          sudo chown "$USER:$USER" /mnt/build_wrt
+          ln -s /mnt/build_wrt "$GITHUB_WORKSPACE/wrt"
+          df -h /mnt
+
+      - name: Install build dependencies
+        # 依赖清单直接沿用 pbs05/ponwrt 自带 release.yml 在 ubuntu-24.04 上跑通的那份，
+        # 不要用 README 里那份通用 Debian 清单（其中 ecj/mkisofs/upx-ucl 等在 24.04 不存在）。
+        run: |
+          sudo apt-get update -yqq
+          sudo apt-get install -y --no-install-recommends \
+            asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gettext git g++-multilib gcc-multilib gperf help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
+            libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev \
+            libtool libyaml-dev lld llvm ninja-build p7zip-full patch pkgconf \
+            python3 python3-docutils python3-pip python3-ply python3-pyelftools \
+            qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo \
+            uglifyjs unzip wget xmlto xxd zlib1g-dev zstd
+
+      - name: Clone PonWrt source
+        run: |
+          REF="${{ inputs.source_ref || 'master' }}"
+          echo "source_ref=$REF"
+          # 直接 clone 到 /mnt 的真实目录，wrt 是指向它的符号链接
+          git clone --depth=1 --single-branch --branch "$REF" \
+            https://github.com/pbs05/ponwrt.git /mnt/build_wrt/
+          cd "$GITHUB_WORKSPACE/wrt/"
+          echo "SOURCE_HASH=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SOURCE_REF=$REF" >> "$GITHUB_ENV"
+          echo "--- feeds.conf.default ---"
+          cat feeds.conf.default
+          # 确认两个 PON feed 都在
+          grep -q 'pon_drivers' feeds.conf.default
+          grep -q 'pon_userspace' feeds.conf.default
+
+      - name: Pin APK signing key (optional)
+        working-directory: wrt
+        env:
+          APK_SIGNING_KEY: ${{ secrets.APK_SIGNING_KEY }}
+        run: |
+          # pbs05/ponwrt 的 rules.mk：BUILD_KEY_APK_SEC=$(TOPDIR)/private-key.pem、
+          # BUILD_KEY_APK_PUB=$(TOPDIR)/public-key.pem。文件已存在时构建系统不会重新生成。
+          # 固定私钥可让不同批次的固件与 packages 源互相信任；不设则每次编译随机生成，
+          # 同批固件仍天然信任同批 packages（base-files 会把公钥装进 /etc/apk/keys/）。
+          if [ -n "$APK_SIGNING_KEY" ]; then
+            umask 077
+            printf '%s\n' "$APK_SIGNING_KEY" > private-key.pem
+            openssl ec -in private-key.pem -pubout -out public-key.pem
+            echo "APK build key pinned:"
+            sha256sum public-key.pem
+          else
+            echo "no APK_SIGNING_KEY secret: ephemeral build key will be generated by the build system"
+          fi
+
+      - name: Update and install feeds
+        working-directory: wrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # PON 用户态是 Rust 包（rust/host），首次编译会额外花时间建 host 工具链
+          ls -d feeds/pon_drivers feeds/pon_userspace
+          rustc --version || true
+
+      - name: Apply custom rootfs files
+        env:
+          PACKAGES_REPO_URL: ${{ inputs.packages_repo_url }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/wrt/files"
+          if [ -d "$GITHUB_WORKSPACE/files" ]; then
+            cp -a "$GITHUB_WORKSPACE/files/." "$GITHUB_WORKSPACE/wrt/files/"
+            chmod +x "$GITHUB_WORKSPACE/wrt/files/etc/uci-defaults/"* 2>/dev/null || true
+            echo "custom rootfs files injected:"
+            find "$GITHUB_WORKSPACE/files" -type f -printf '  %P\n'
+          else
+            echo "no custom files/ directory, skip"
+          fi
+          # 可选：把"同批 packages 源"预置进固件。distfeeds.list 由 customize.sh 负责，
+          # 这里写的是 apk 的 customfeeds.list（conffile，sysupgrade 会保留）。
+          if [ -n "$PACKAGES_REPO_URL" ]; then
+            URL="${PACKAGES_REPO_URL%/}"
+            mkdir -p "$GITHUB_WORKSPACE/wrt/files/etc/apk/repositories.d"
+            {
+              echo '# 本次固件同批编译的内核模块 / 软件包源（由 workflow 注入）'
+              echo "$URL/targets/airoha/an7581/packages/packages.adb"
+            } > "$GITHUB_WORKSPACE/wrt/files/etc/apk/repositories.d/customfeeds.list"
+            echo "custom packages repo: $URL/targets/airoha/an7581/packages/packages.adb"
+          fi
+
+      - name: Configure (single device + PON feeds + extras + EasyMesh)
+        working-directory: wrt
+        env:
+          APK_REPO_KEY_URL: ${{ inputs.apk_repo_key_url }}
+        run: |
+          cp configs/an7581.config .config
+          # 先追加基础配置，再追加 EasyMesh 追加块（kconfig 后者覆盖前者）
+          cat "$GITHUB_WORKSPACE/Config-HG5585F-CT.txt" >> .config
+          cat "$GITHUB_WORKSPACE/Config-HG5585F-CT-EasyMesh.txt" >> .config
+
+          if [ -f "$GITHUB_WORKSPACE/customize.sh" ]; then
+            bash "$GITHUB_WORKSPACE/customize.sh"
+          fi
+
+          make defconfig
+
+          echo "===== packages that will be built as .apk (=m) ====="
+          echo "module packages: $(grep -c '^CONFIG_PACKAGE_.*=m$' .config || true)"
+          echo "===== key config after defconfig ====="
+          grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|MULTI_PROFILE|PER_DEVICE_ROOTFS)=' .config || true
+          grep -E '^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_fiberhome_hg5585f-ct=y' .config \
+            || { echo "ERROR: HG5585F-CT profile 未启用" >&2; exit 1; }
+          grep -E '^CONFIG_FEED_pon_(drivers|userspace)=y' .config \
+            || { echo "ERROR: PON feed 未启用（检查 feeds.conf.default 与配置覆盖顺序）" >&2; exit 1; }
+          echo "--- PON packages (只提示，不硬断言，避免 defconfig 降级卡住首次构建) ---"
+          grep -E '^CONFIG_PACKAGE_(kmod-airoha-xpon|airoha-pond|luci-app-pon)=' .config || true
+
+          # 断言：PON feed 不能被关掉（这是最容易踩的坑）
+          if grep -qE '^CONFIG_FEED_pon_(drivers|userspace)=n' .config; then
+            echo "ERROR: PON feed disabled by config" >&2
+            exit 1
+          fi
+
+          echo "===== user-requested packages（缺失即失败，避免编出不含插件的固件） ====="
+          # prplmesh 是本 EasyMesh 版相对基础版的唯一增量，必须硬断言。
+          for p in tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn \
+                   vlmcsd luci-app-vlmcsd luci-i18n-vlmcsd-zh-cn prplmesh; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              echo "  OK   $p"
+            else
+              echo "ERROR: $p 未启用（feed 里找不到该包，或 defconfig 因依赖降级）" >&2
+              exit 1
+            fi
+          done
+
+          echo "===== 默认设置：软件源 / 时区 / NTP ====="
+          # VERSION_REPO 不是 kconfig 符号，defconfig 可能丢弃；只提示。
+          # 真正生效的是下面 distfeeds.list 覆盖文件 + uci-defaults 兜底。
+          grep -E '^CONFIG_VERSION_REPO=' .config \
+            || echo "INFO: VERSION_REPO 被 defconfig 丢弃（不影响，源由 files/ 覆盖）"
+          grep -E '^CONFIG_PACKAGE_zoneinfo-(core|asia)=y' .config \
+            || echo "WARN: zoneinfo 未选中，Asia/Shanghai 可能只显示名字" >&2
+          grep -n -E "timezone=|zonename=|add_list system.ntp.server" \
+            package/base-files/files/bin/config_generate | head -8
+          echo "--- files/etc/apk/repositories.d/distfeeds.list ---"
+          cat files/etc/apk/repositories.d/distfeeds.list
+          test "$(grep -c packages.adb files/etc/apk/repositories.d/distfeeds.list)" -eq 6 \
+            || { echo "ERROR: apk 源不是预期的 6 条" >&2; exit 1; }
+
+          cp .config "$GITHUB_WORKSPACE/Config-final.txt"
+
+      - name: Upload config (test_only)
+        if: ${{ inputs.test_only }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: hg5585f-ct-easymesh-config-${{ github.run_number }}
+          path: Config-final.txt
+          retention-days: 14
+
+      - name: Download sources
+        if: ${{ !inputs.test_only }}
+        working-directory: wrt
+        run: make download -j"$(nproc)"
+
+      - name: Compile
+        if: ${{ !inputs.test_only }}
+        working-directory: wrt
+        run: |
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Refresh package index
+        if: ${{ !inputs.test_only }}
+        working-directory: wrt
+        run: |
+          # 顶层 make 的 world 末尾已经跑过 package/index；这里显式再跑一次是幂等保险，
+          # 确保每个包目录都有 packages.adb + index.json（apk mkndx 用 private-key.pem 签名）。
+          make package/index
+          echo "--- generated apk indexes ---"
+          find bin/targets/airoha/an7581/packages bin/packages -name packages.adb \
+            -printf '%p %s bytes\n' 2>/dev/null | sort || true
+
+      - name: Collect firmware + matching packages
+        if: ${{ !inputs.test_only }}
+        env:
+          PUBLISH_PACKAGES: ${{ inputs.publish_packages }}
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          cd "$GITHUB_WORKSPACE/wrt"
+          echo "===== bin/targets/airoha/an7581 ====="
+          ls -lh bin/targets/airoha/an7581/ | head -40
+
+          find bin/targets/airoha/an7581 -maxdepth 1 -type f \
+            -name "*hg5585f-ct*" ! -name "*.json" \
+            -exec cp -v {} "$GITHUB_WORKSPACE/artifact/" \;
+
+          # 必须真的产出 .itb，不能只上传一个 config 就算成功
+          ls "$GITHUB_WORKSPACE/artifact/"*hg5585f-ct*.itb >/dev/null 2>&1 || {
+            echo "ERROR: 没有找到 HG5585F-CT 的 .itb 固件，检查上面的产物列表" >&2
+            exit 1
+          }
+
+          # EasyMesh 版额外确认：编译出的 packages 里真的有 prplmesh（提示性检查）
+          echo "===== prplmesh artifacts ====="
+          find bin/targets bin/packages -name 'prplmesh*' 2>/dev/null \
+            | while read -r f; do echo "  $f"; done || true
+
+          cp .config "$GITHUB_WORKSPACE/artifact/Config-final.txt"
+          echo "$SOURCE_HASH" > "$GITHUB_WORKSPACE/artifact/source-commit.txt"
+
+          # ---- 同批 packages：kmod 与本次内核 vermagic 严格绑定，只能同期产出 ----
+          # 定时/其他事件触发时 inputs 为空，按默认开启处理；只有显式 false 才关闭。
+          case "$PUBLISH_PACKAGES" in
+            false) DO_PACKAGES=0 ;;
+            *)     DO_PACKAGES=1 ;;
+          esac
+          if [ "$DO_PACKAGES" = "1" ]; then
+            ROOT="$GITHUB_WORKSPACE/pkgroot"
+            rm -rf "$ROOT"
+            mkdir -p "$ROOT/targets/airoha/an7581/packages" "$ROOT/packages"
+
+            # 目标目录：kmod-*.apk 全在这里；bin/packages/<arch>/<feed>：用户态 .apk
+            cp -a bin/targets/airoha/an7581/packages/. "$ROOT/targets/airoha/an7581/packages/" 2>/dev/null || true
+            if [ -d bin/packages ]; then cp -a bin/packages/. "$ROOT/packages/"; fi
+
+            KMOD_N=$(find "$ROOT" -type f -name 'kmod-*.apk' | wc -l)
+            APK_N=$(find "$ROOT" -type f -name '*.apk' | wc -l)
+            IDX_N=$(find "$ROOT" -type f -name 'packages.adb' | wc -l)
+            echo "===== matching packages: kmod=$KMOD_N apk=$APK_N index=$IDX_N ====="
+            test "$KMOD_N" -gt 0 || { echo "ERROR: 没有编出 kmod-*.apk，无法作为配套内核包源" >&2; exit 1; }
+            test "$APK_N" -gt 0 || { echo "ERROR: 没有编出 .apk" >&2; exit 1; }
+            test "$IDX_N" -gt 0 || { echo "ERROR: 没有 packages.adb 索引" >&2; exit 1; }
+
+            if [ -f public-key.pem ]; then
+              cp public-key.pem "$ROOT/public-key.pem"
+            else
+              echo "WARN: public-key.pem 缺失，旧固件需自行导入公钥" >&2
+            fi
+            {
+              echo "# 本次固件同批编译的 packages（源码 $SOURCE_REF @ $SOURCE_HASH，EasyMesh 版）"
+              echo "# 把本 tar 解开到静态站点根目录 BASE，然后按需把下面的行加到设备的"
+              echo "#   /etc/apk/repositories.d/customfeeds.list"
+              echo "# 只需要与内核匹配的 kmod 时只加第 1 条即可；用户态包可继续用北大镜像。"
+              echo "BASE/targets/airoha/an7581/packages/packages.adb"
+              find "$ROOT/packages" -name packages.adb -printf '%P\n' 2>/dev/null \
+                | sort | sed 's|^|BASE/packages/|' || true
+            } > "$ROOT/apk-repos.txt"
+            {
+              echo "variant=easymesh"
+              echo "source_ref=$SOURCE_REF"
+              echo "source_commit=$SOURCE_HASH"
+              echo "target=airoha/an7581"
+              echo "profile=fiberhome_hg5585f-ct"
+              echo "linux=$(grep -m1 '^CONFIG_LINUX_VERSION=' .config || echo unknown)"
+              echo "kmods=$KMOD_N apks=$APK_N indexes=$IDX_N"
+            } > "$ROOT/BUILD_INFO.txt"
+
+            cd "$GITHUB_WORKSPACE"
+            tar --zstd -cf "artifact/packages-${{ github.run_number }}.tar.zst" -C "$ROOT" .
+            echo "packages tarball:"
+            ls -lh "artifact/packages-${{ github.run_number }}.tar.zst"
+          fi
+
+          cd "$GITHUB_WORKSPACE/artifact"
+          find . -maxdepth 1 -type f ! -name sha256sums.txt -printf '%f\n' \
+            | sort | xargs sha256sum > sha256sums.txt
+          echo "===== artifact ====="
+          ls -lh
+
+      - name: Upload firmware
+        if: ${{ !inputs.test_only }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ponwrt-hg5585f-ct-easymesh-${{ github.run_number }}
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release
+        if: ${{ !inputs.test_only && inputs.create_release }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: hg5585f-ct-easymesh-${{ github.run_number }}
+          name: PonWrt HG5585F-CT EasyMesh (${{ github.run_number }})
+          files: artifact/*
+          body: |
+            EasyMesh 版（含 prplmesh，可与中兴 E2637 组有线 mesh）
+            源码 pbs05/ponwrt `${{ env.SOURCE_REF }}` @ `${{ env.SOURCE_HASH }}`
+            目标 airoha / an7581 / fiberhome_hg5585f-ct
+            配置见 Config-final.txt；校验见 sha256sums.txt
+            同批 packages（含与内核匹配的 kmod + packages.adb）见 `packages-*.tar.zst`，
+            解包后的用法见包内 apk-repos.txt / BUILD_INFO.txt。
