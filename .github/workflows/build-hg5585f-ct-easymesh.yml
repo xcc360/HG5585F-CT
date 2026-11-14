@@ -12,7 +12,7 @@
 #   Config-HG5585F-CT-EasyMesh.txt                    <- EasyMesh 追加块（prplmesh）
 #   customize.sh                                      <- 时区/NTP/主机名 + 生成 apk 源
 #   files/                                            <- 首次开机 uci-defaults（承载默认设置，别删）
-# 然后 Actions -> Build PonWrt HG5585F-CT (EasyMesh) -> Run workflow。
+# 然后 Actions -> HG5585F-2P5G-CT-sysupgrade-EasyMesh -> Run workflow。
 #
 # 源码固定用 pbs05/ponwrt；两个 PON 仓由它的 feeds.conf.default 自动拉取，无需单独 clone.
 #
@@ -23,7 +23,15 @@
 # 本 workflow 会把它们连同 public-key.pem 一起打包发布（kmod 与本次内核 vermagic 严格绑定）。
 # 可选 Secret APK_SIGNING_KEY（PEM 私钥）固定签名 key，不设则每次编译随机生成、仅同批互信。
 
-name: Build PonWrt HG5585F-CT (EasyMesh)
+# 统一命名 ID: HG5585F-2P5G-CT-sysupgrade-EasyMesh
+#   规则 <型号>-<网口>-<运营商>-<产物类型>（uboot / sysupgrade）；
+#   EasyMesh 是同一主板的固件功能变体，作为 ID 后缀以保证 tag / artifact 不撞名。
+#   HG5585F-CT 网口 = 1x2.5G(lan1,GPY211C 2500base-x) + 3xGE(lan2~4)，故为 2P5G；
+#   运营商 CT（电信）；本仓库两个 workflow 都是 sysupgrade 固件，无 uboot。
+#   仅作用于展示层：workflow / job / artifact / release / packages / BUILD_INFO。
+#   机器层 profile / target / CONFIG_TARGET_DEVICE_* / Config 文件名 / customize.sh
+#   一律不动，workflow .yml 路径也保留，避免 GitHub 按路径重建 workflow、丢 run 历史。
+name: HG5585F-2P5G-CT-sysupgrade-EasyMesh
 
 on:
   workflow_dispatch:
@@ -66,7 +74,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: hg5585f-ct-easymesh-${{ github.ref }}
+  group: hg5585f-2p5g-ct-sysupgrade-easymesh-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -75,7 +83,7 @@ env:
 
 jobs:
   build:
-    name: PonWrt / airoha-an7581 / HG5585F-CT (EasyMesh)
+    name: HG5585F-2P5G-CT-sysupgrade-EasyMesh / build
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -248,7 +256,7 @@ jobs:
         if: ${{ inputs.test_only }}
         uses: actions/upload-artifact@v6
         with:
-          name: hg5585f-ct-easymesh-config-${{ github.run_number }}
+          name: HG5585F-2P5G-CT-sysupgrade-EasyMesh-config-${{ github.run_number }}
           path: Config-final.txt
           retention-days: 14
 
@@ -345,15 +353,17 @@ jobs:
               echo "source_ref=$SOURCE_REF"
               echo "source_commit=$SOURCE_HASH"
               echo "target=airoha/an7581"
+              echo "release_id=HG5585F-2P5G-CT-sysupgrade-EasyMesh"
+              echo "artifact_type=sysupgrade"
               echo "profile=fiberhome_hg5585f-ct"
               echo "linux=$(grep -m1 '^CONFIG_LINUX_VERSION=' .config || echo unknown)"
               echo "kmods=$KMOD_N apks=$APK_N indexes=$IDX_N"
             } > "$ROOT/BUILD_INFO.txt"
 
             cd "$GITHUB_WORKSPACE"
-            tar --zstd -cf "artifact/packages-${{ github.run_number }}.tar.zst" -C "$ROOT" .
+            tar --zstd -cf "artifact/HG5585F-2P5G-CT-sysupgrade-EasyMesh-packages-${{ github.run_number }}.tar.zst" -C "$ROOT" .
             echo "packages tarball:"
-            ls -lh "artifact/packages-${{ github.run_number }}.tar.zst"
+            ls -lh "artifact/HG5585F-2P5G-CT-sysupgrade-EasyMesh-packages-${{ github.run_number }}.tar.zst"
           fi
 
           cd "$GITHUB_WORKSPACE/artifact"
@@ -366,7 +376,7 @@ jobs:
         if: ${{ !inputs.test_only }}
         uses: actions/upload-artifact@v6
         with:
-          name: ponwrt-hg5585f-ct-easymesh-${{ github.run_number }}
+          name: HG5585F-2P5G-CT-sysupgrade-EasyMesh-${{ github.run_number }}
           path: artifact/*
           if-no-files-found: error
           retention-days: 30
@@ -375,13 +385,14 @@ jobs:
         if: ${{ !inputs.test_only && inputs.create_release }}
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: hg5585f-ct-easymesh-${{ github.run_number }}
-          name: PonWrt HG5585F-CT EasyMesh (${{ github.run_number }})
+          tag_name: HG5585F-2P5G-CT-sysupgrade-EasyMesh-${{ github.run_number }}
+          name: HG5585F-2P5G-CT-sysupgrade-EasyMesh (${{ github.run_number }})
           files: artifact/*
           body: |
+            Release ID `HG5585F-2P5G-CT-sysupgrade-EasyMesh`
             EasyMesh 版（含 prplmesh，可与中兴 E2637 组有线 mesh）
             源码 pbs05/ponwrt `${{ env.SOURCE_REF }}` @ `${{ env.SOURCE_HASH }}`
             目标 airoha / an7581 / fiberhome_hg5585f-ct
             配置见 Config-final.txt；校验见 sha256sums.txt
-            同批 packages（含与内核匹配的 kmod + packages.adb）见 `packages-*.tar.zst`，
+            同批 packages（含与内核匹配的 kmod + packages.adb）见 `HG5585F-2P5G-CT-sysupgrade-EasyMesh-packages-*.tar.zst`，
             解包后的用法见包内 apk-repos.txt / BUILD_INFO.txt。
